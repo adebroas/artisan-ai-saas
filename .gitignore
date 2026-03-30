@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build
+dist/
+.next/
+build/
+
+# Environment (NE JAMAIS COMMITER)
+.env
+.env.local
+.env.*.local
+
+# Prisma
+prisma/config.ts
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Docker volumes
+postgres_data/
+redis_data/
