@@ -26,6 +26,7 @@ import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
+import { OrchestratorModule } from './orchestrator/orchestrator.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
     IntegrationsModule,
     DashboardModule,
     AuditLogsModule,
+    OrchestratorModule,
   ],
 })
 export class AppModule {}
