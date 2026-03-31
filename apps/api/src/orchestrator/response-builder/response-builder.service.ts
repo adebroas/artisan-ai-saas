@@ -20,8 +20,11 @@ export class ResponseBuilderService {
 
       case 'collect_address': {
         const prenom = collectedData.fullName
-          ? collectedData.fullName.split(' ')[0]
-          : '';
+  ?       collectedData.fullName.split(' ')[0].toLowerCase() === 'je' ||
+          collectedData.fullName.split(' ')[0].toLowerCase() === 'suis'
+    ?     collectedData.fullName.split(' ')[1] ?? ''
+    :     collectedData.fullName.split(' ')[0]
+  : '';
         return `Merci${prenom ? ' ' + prenom : ''}. Quelle est votre adresse d'intervention ?`;
       }
 

@@ -6,12 +6,12 @@ import { ConversationStep, ExtractionResult } from '../types/orchestrator.types'
 // ─── Zod schema ──────────────────────────────────────────────────────────────
 
 const ExtractionSchema = z.object({
-  issueDescription: z.string().optional(),
-  fullName: z.string().optional(),
-  address: z.string().optional(),
-  urgencyLevel: z.enum(['low', 'medium', 'high']).optional(),
-  urgencyDetected: z.boolean().optional(),
-  unrecognizedIntent: z.boolean().optional(),
+  issueDescription: z.string().nullish().transform(v => v ?? undefined),
+  fullName: z.string().nullish().transform(v => v ?? undefined),
+  address: z.string().nullish().transform(v => v ?? undefined),
+  urgencyLevel: z.enum(['low', 'medium', 'high']).nullish().transform(v => v ?? undefined),
+  urgencyDetected: z.boolean().nullish().transform(v => v ?? undefined),
+  unrecognizedIntent: z.boolean().nullish().transform(v => v ?? undefined),
 });
 
 // ─── OpenAI response shape ────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ Reponds avec ce JSON et rien d'autre :
 Regles :
 - N'inclus pas un champ si l'information n'est pas presente dans le message.
 - issueDescription : phrase courte et factuelle, max 150 caracteres.
-- fullName : format "Prenom Nom" normalise.
+- fullName : extrais uniquement le nom propre, ignore les mots comme "je suis", "je m'appelle", "c'est", "bonjour". Format "Prenom Nom" normalise.
 - address : adresse complete telle qu'exprimee.
 - urgencyLevel "high" si danger, panne totale, inondation, gaz, urgence explicite.
 - urgencyLevel "medium" si probleme important mais pas immediat.
