@@ -27,6 +27,7 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { OrchestratorModule } from './orchestrator/orchestrator.module';
+import { TelnyxModule } from './telnyx/telnyx.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { OrchestratorModule } from './orchestrator/orchestrator.module';
     DashboardModule,
     AuditLogsModule,
     OrchestratorModule,
+    TelnyxModule,
   ],
 })
 export class AppModule {}
