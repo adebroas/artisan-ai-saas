@@ -27,8 +27,8 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
 import { OrchestratorModule } from './orchestrator/orchestrator.module';
-import { TelnyxModule } from './telnyx/telnyx.module';
-
+import { TwilioModule } from './twilio/twilio.module';
+import { VoiceTestModule } from './voice-test/voice-test.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -51,7 +51,8 @@ import { TelnyxModule } from './telnyx/telnyx.module';
     DashboardModule,
     AuditLogsModule,
     OrchestratorModule,
-    TelnyxModule,
+    TwilioModule,
+    VoiceTestModule,
   ],
 })
 export class AppModule {}
