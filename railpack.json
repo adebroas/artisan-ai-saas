@@ -1,0 +1,8 @@
+{
+  "deploy": {
+    "startCommand": "cd apps/api && node dist/main.js"
+  },
+  "build": {
+    "buildCommand": "cd apps/api && pnpm install && pnpm run build"
+  }
+}

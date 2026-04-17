@@ -1,5 +1,0 @@
-[phases.build]
-cmds = ["cd apps/api && pnpm install && pnpm run build"]
-
-[start]
-cmd = "cd apps/api && node dist/main.js"
