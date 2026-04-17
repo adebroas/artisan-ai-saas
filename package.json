@@ -1,18 +1,12 @@
 {
-  "name": "@artisan-ai/shared",
+  "name": "artisan-ai-saas",
   "version": "1.0.0",
   "private": true,
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
   "scripts": {
-    "build": "tsc"
-  },
-  "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "express": "^5.2.1"
+    "build": "cd apps/api && pnpm run build",
+    "dev": "concurrently \"cd apps/api && pnpm run dev\" \"cd apps/web && pnpm run dev\""
   },
   "devDependencies": {
-    "@types/bcryptjs": "^3.0.0",
-    "@types/express": "^5.0.6"
+    "concurrently": "^9.0.0"
   }
 }
