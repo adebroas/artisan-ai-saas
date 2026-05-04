@@ -65,7 +65,19 @@ interface SessionData {
 }
 
 @WebSocketGateway({
-  cors: { origin: 'http://localhost:3000', credentials: true },
+  cors: {
+    origin: (origin: string, callback: (err: Error | null, allow?: boolean) => void) => {
+      // En développement ou si pas d'origine (ex: Postman), on autorise
+      if (!origin) return callback(null, true);
+      const allowed = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+      if (origin === allowed || process.env.NODE_ENV !== 'production') {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: ${origin}`));
+      }
+    },
+    credentials: true,
+  },
   namespace: 'voice',
 })
 export class VoiceTestGateway
@@ -108,7 +120,6 @@ export class VoiceTestGateway
     openAiWs.on('open', () => {
       this.logger.log(`OpenAI WS open for client: ${client.id}`);
 
-      // Configure la session
       openAiWs.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -123,7 +134,6 @@ export class VoiceTestGateway
         },
       }));
 
-      // Message de démarrage
       openAiWs.send(JSON.stringify({
         type: 'conversation.item.create',
         item: {
