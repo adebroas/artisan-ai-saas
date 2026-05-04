@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "cd apps/api && pnpm run build",
+    "build": "echo 'use service-specific build commands'",
     "dev": "concurrently \"cd apps/api && pnpm run dev\" \"cd apps/web && pnpm run dev\""
   },
   "devDependencies": {
