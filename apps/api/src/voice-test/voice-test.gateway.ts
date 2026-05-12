@@ -13,6 +13,7 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import WebSocket = require('ws');
 import { ConfigService } from '@nestjs/config';
+import { VoiceTestService } from './voice-test.service';
 
 // ─── Types internes ───────────────────────────────────────────────────────────
 
@@ -20,7 +21,50 @@ interface SessionState {
   openAiWs: WebSocket | null;
   isConnected: boolean;
   audioBuffer: Buffer[];
+  callSessionId: string | null;         // ID de la CallSession en BDD
+  functionCallBuffer: string;           // Buffer pour les arguments en streaming
+  currentFunctionCallId: string | null; // ID du function call en cours
 }
+
+// ─── Tool definition ──────────────────────────────────────────────────────────
+
+const SAVE_DATA_TOOL = {
+  type: 'function',
+  name: 'save_collected_data',
+  description:
+    "Sauvegarde les informations collectées pendant la conversation (nom, adresse, problème, créneau, urgence). Appelle cette fonction dès que tu as confirmé le rendez-vous avec le client, ou à la fin de l'appel.",
+  parameters: {
+    type: 'object',
+    properties: {
+      callerFirstName: {
+        type: 'string',
+        description: 'Prénom du client',
+      },
+      callerLastName: {
+        type: 'string',
+        description: 'Nom de famille du client',
+      },
+      callerAddress: {
+        type: 'string',
+        description: "Adresse complète d'intervention",
+      },
+      problemDescription: {
+        type: 'string',
+        description: 'Description courte du problème de plomberie',
+      },
+      urgencyLevel: {
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high'],
+        description: 'Niveau d\'urgence détecté',
+      },
+      desiredSlot: {
+        type: 'string',
+        description: 'Créneau souhaité par le client (texte libre ou ISO date)',
+      },
+    },
+    required: [],
+  },
+};
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
@@ -37,17 +81,25 @@ Prendre des rendez-vous pour les clients de Jean. Tu gères son agenda et tu peu
 3. Collecter le nom complet du client
 4. Collecter l'adresse d'intervention
 5. Proposer des créneaux disponibles et confirmer le rendez-vous
-6. Récapituler et conclure
+6. **Appeler save_collected_data avec toutes les infos collectées**
+7. Conclure chaleureusement
 
 ## Créneaux disponibles à proposer
-Tu proposes toujours 2-3 options parmi ces plages horaires (adapte selon le jour de l'appel) :
+Tu proposes toujours 2-3 options parmi ces plages horaires :
 - Matin : 8h-12h
 - Après-midi : 14h-18h
 - Exemple : "Jean est disponible demain matin entre 8h et 10h, ou jeudi après-midi — qu'est-ce qui vous arrange le mieux ?"
 
 ## Gestion des urgences
 Une urgence c'est : inondation active, fuite importante avec dégâts, odeur de gaz, pas d'eau du tout, pas de chauffage en hiver.
-Dans ce cas SEULEMENT : "C'est urgent, je préviens Jean immédiatement pour qu'il vous rappelle dans les plus brefs délais. Votre numéro c'est bien le [numéro affiché] ?"
+Dans ce cas SEULEMENT : "C'est urgent, je préviens Jean immédiatement pour qu'il vous rappelle dans les plus brefs délais. Votre adresse ?"
+Puis appelle save_collected_data avec urgencyLevel: "high".
+
+## Fonction save_collected_data
+Tu DOIS appeler cette fonction dans ces situations :
+- Juste après avoir confirmé le rendez-vous avec le client
+- Si le client raccroche ou dit au revoir avant la confirmation
+- Pour toute urgence dès que tu as l'adresse
 
 ## Ton caractère
 - Chaleureuse et empathique
@@ -66,10 +118,13 @@ Client : "Madame Lefebvre."
 Lisa : "Parfait madame Lefebvre. Jean est disponible demain matin entre 9h et 11h, ou jeudi après-midi à partir de 14h — qu'est-ce qui vous convient le mieux ?"
 Client : "Demain matin c'est parfait."
 Lisa : "C'est noté ! Rendez-vous demain matin entre 9h et 11h au 12 rue des Acacias. Jean vous appellera avant de partir. Bonne journée !"
+[Lisa appelle save_collected_data]
 
 ### Exemple 2 — Urgence
 Client : "Il y a de l'eau partout, une canalisation a pété !"
-Lisa : "Oh là, c'est urgent ! Coupez votre vanne d'arrêt d'eau principale si vous pouvez. Je préviens Jean immédiatement pour qu'il vous rappelle dans les plus brefs délais. Votre adresse ?"
+Lisa : "Oh là, c'est urgent ! Coupez votre vanne d'arrêt d'eau principale si vous pouvez. Je préviens Jean immédiatement. Votre adresse ?"
+Client : "15 avenue Berthelot Lyon."
+[Lisa appelle save_collected_data avec urgencyLevel: "high"]
 
 ### Exemple 3 — Client peu loquace
 Client : "Chauffe-eau."
@@ -79,14 +134,8 @@ Lisa : "Bonjour ! Votre chauffe-eau vous pose problème ? C'est une panne totale
 Client : "[inaudible]"
 Lisa : "Excusez-moi, je n'ai pas bien entendu — vous pouvez répéter ?"
 
-### Exemple 5 — Interruption
-Lisa : "Jean est disponible —"
-Client : "— le matin de préférence."
-Lisa : "Parfait, demain matin entre 8h et 10h, ça vous va ?"
-
 ## Gestion des questions délicates
-- **Tarifs** : "Pour le devis exact, Jean vous le communiquera sur place — les tarifs dépendent du travail à faire."
-- **Disponibilités très précises** : tu proposes des plages, pas des heures fixes
+- **Tarifs** : "Pour le devis exact, Jean vous le communiquera sur place."
 - **Client qui s'emporte** : "Je comprends, on va s'en occuper le plus vite possible."
 - **Silence prolongé** : "Vous êtes toujours là ?"
 
@@ -112,7 +161,10 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
   private readonly sessions = new Map<string, SessionState>();
   private readonly openAiApiKey: string;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly voiceTestService: VoiceTestService,
+  ) {
     this.openAiApiKey = this.configService.getOrThrow<string>('OPENAI_API_KEY');
   }
 
@@ -124,11 +176,18 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
       openAiWs: null,
       isConnected: false,
       audioBuffer: [],
+      callSessionId: null,
+      functionCallBuffer: '',
+      currentFunctionCallId: null,
     });
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Client déconnecté : ${client.id}`);
+    const session = this.sessions.get(client.id);
+    if (session?.callSessionId) {
+      void this.voiceTestService.closeCallSession(session.callSessionId);
+    }
     this.closeOpenAiSession(client.id);
     this.sessions.delete(client.id);
   }
@@ -137,7 +196,16 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
 
   @SubscribeMessage('start_session')
   async handleStartSession(@ConnectedSocket() client: Socket) {
-    this.logger.log(`Démarrage session OpenAI pour client ${client.id}`);
+    this.logger.log(`Démarrage session pour client ${client.id}`);
+
+    // Créer la CallSession en BDD dès le début
+    const session = this.sessions.get(client.id);
+    if (session) {
+      const callSessionId = await this.voiceTestService.createCallSession();
+      session.callSessionId = callSessionId;
+      client.emit('call_session_id', { callSessionId });
+    }
+
     await this.createOpenAiSession(client);
   }
 
@@ -162,6 +230,10 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
   @SubscribeMessage('stop_session')
   handleStopSession(@ConnectedSocket() client: Socket) {
     this.logger.log(`Arrêt session pour client ${client.id}`);
+    const session = this.sessions.get(client.id);
+    if (session?.callSessionId) {
+      void this.voiceTestService.closeCallSession(session.callSessionId);
+    }
     this.closeOpenAiSession(client.id);
   }
 
@@ -205,6 +277,8 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
               prefix_padding_ms: 300,
               silence_duration_ms: 400,
             },
+            tools: [SAVE_DATA_TOOL],
+            tool_choice: 'auto',
             temperature: 0.6,
             max_response_output_tokens: 1024,
           },
@@ -215,7 +289,7 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
     });
 
     ws.on('message', (rawData: WebSocket.RawData) => {
-      this.handleOpenAiMessage(client, rawData);
+      void this.handleOpenAiMessage(client, rawData);
     });
 
     ws.on('error', (err: Error) => {
@@ -232,9 +306,11 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
     });
   }
 
-  private handleOpenAiMessage(client: Socket, rawData: WebSocket.RawData) {
-    let event: Record<string, unknown>;
+  private async handleOpenAiMessage(client: Socket, rawData: WebSocket.RawData) {
+    const session = this.sessions.get(client.id);
+    if (!session) return;
 
+    let event: Record<string, unknown>;
     try {
       event = JSON.parse(rawData.toString()) as Record<string, unknown>;
     } catch {
@@ -245,11 +321,12 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
     const type = event.type as string;
 
     switch (type) {
+
+      // ── Audio ──────────────────────────────────────────────────────────────
+
       case 'response.audio.delta': {
         const delta = event.delta as string | undefined;
-        if (delta) {
-          client.emit('audio_chunk', { audio: delta });
-        }
+        if (delta) client.emit('audio_chunk', { audio: delta });
         break;
       }
 
@@ -258,29 +335,27 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
         break;
       }
 
+      // ── Transcriptions ─────────────────────────────────────────────────────
+
       case 'conversation.item.input_audio_transcription.completed': {
         const transcript = event.transcript as string | undefined;
-        if (transcript) {
-          client.emit('user_transcript', { text: transcript });
-        }
+        if (transcript) client.emit('user_transcript', { text: transcript });
         break;
       }
 
       case 'response.audio_transcript.delta': {
         const delta = event.delta as string | undefined;
-        if (delta) {
-          client.emit('assistant_transcript_delta', { text: delta });
-        }
+        if (delta) client.emit('assistant_transcript_delta', { text: delta });
         break;
       }
 
       case 'response.audio_transcript.done': {
         const transcript = event.transcript as string | undefined;
-        if (transcript) {
-          client.emit('assistant_transcript', { text: transcript });
-        }
+        if (transcript) client.emit('assistant_transcript', { text: transcript });
         break;
       }
+
+      // ── VAD ────────────────────────────────────────────────────────────────
 
       case 'input_audio_buffer.speech_started': {
         client.emit('speech_started');
@@ -291,6 +366,37 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
         client.emit('speech_stopped');
         break;
       }
+
+      // ── Function calls — accumulation des arguments en streaming ───────────
+
+      case 'response.function_call_arguments.delta': {
+        const delta = event.delta as string | undefined;
+        const callId = event.call_id as string | undefined;
+        if (delta) {
+          session.functionCallBuffer += delta;
+          session.currentFunctionCallId = callId ?? null;
+        }
+        break;
+      }
+
+      // ── Function calls — exécution quand les arguments sont complets ────────
+
+      case 'response.function_call_arguments.done': {
+        const callId = event.call_id as string | undefined;
+        const name = event.name as string | undefined;
+        const argsStr = event.arguments as string | undefined;
+
+        if (name === 'save_collected_data' && argsStr) {
+          await this.executeSaveCollectedData(client, session, callId ?? '', argsStr);
+        }
+
+        // Reset buffer
+        session.functionCallBuffer = '';
+        session.currentFunctionCallId = null;
+        break;
+      }
+
+      // ── Erreurs ────────────────────────────────────────────────────────────
 
       case 'error': {
         const error = event.error as { message?: string } | undefined;
@@ -303,6 +409,61 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
         break;
     }
   }
+
+  // ─── Exécution du function call save_collected_data ───────────────────────
+
+  private async executeSaveCollectedData(
+    client: Socket,
+    session: SessionState,
+    callId: string,
+    argsStr: string,
+  ): Promise<void> {
+    let args: Record<string, unknown>;
+
+    try {
+      args = JSON.parse(argsStr) as Record<string, unknown>;
+    } catch {
+      this.logger.error(`Arguments function call invalides : ${argsStr}`);
+      args = {};
+    }
+
+    this.logger.log(`Function call save_collected_data : ${JSON.stringify(args)}`);
+
+    // Sauvegarder en BDD si on a un callSessionId
+    if (session.callSessionId) {
+      await this.voiceTestService.saveCollectedData(session.callSessionId, {
+        callerFirstName: args.callerFirstName as string | undefined,
+        callerLastName: args.callerLastName as string | undefined,
+        callerAddress: args.callerAddress as string | undefined,
+        problemDescription: args.problemDescription as string | undefined,
+        urgencyLevel: args.urgencyLevel as 'none' | 'low' | 'medium' | 'high' | undefined,
+        desiredSlot: args.desiredSlot as string | undefined,
+      });
+    }
+
+    // Notifier le frontend
+    client.emit('data_saved', { data: args });
+
+    // Confirmer à OpenAI que le function call est exécuté
+    // (obligatoire sinon OpenAI attend indéfiniment)
+    if (session.openAiWs?.readyState === WebSocket.OPEN) {
+      session.openAiWs.send(
+        JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: callId,
+            output: JSON.stringify({ success: true, message: 'Données sauvegardées avec succès' }),
+          },
+        }),
+      );
+
+      // Demander à OpenAI de continuer la conversation
+      session.openAiWs.send(JSON.stringify({ type: 'response.create' }));
+    }
+  }
+
+  // ─── Fermeture session OpenAI ──────────────────────────────────────────────
 
   private closeOpenAiSession(clientId: string) {
     const session = this.sessions.get(clientId);
