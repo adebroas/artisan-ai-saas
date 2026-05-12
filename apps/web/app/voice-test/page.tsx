@@ -306,7 +306,7 @@ export default function VoiceTestPage() {
 
         {/* Header */}
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-gray-800">🔧 Lisa — Assistante vocale</h1>
+          <h1 className="text-3xl font-bold text-gray-800">Lisa — Assistante vocale</h1>
           <p className="text-gray-500 mt-1">Secrétaire de Jean Dupont, plombier à Lyon</p>
         </div>
 
@@ -318,12 +318,12 @@ export default function VoiceTestPage() {
           </span>
           {isSpeaking && (
             <span className="ml-auto text-sm text-blue-500 animate-pulse">
-              🔊 Lisa parle...
+              Lisa parle...
             </span>
           )}
           {userSpeaking && !isSpeaking && (
             <span className="ml-auto text-sm text-green-500 animate-pulse">
-              🎤 Vous parlez...
+              Vous parlez...
             </span>
           )}
         </div>
@@ -335,7 +335,7 @@ export default function VoiceTestPage() {
               onClick={connectSocket}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
             >
-              📞 Démarrer la session
+              Démarrer la session
             </button>
           )}
           {sessionState === 'ready' && (
@@ -345,21 +345,21 @@ export default function VoiceTestPage() {
                   onClick={() => { void startRecording(); }}
                   className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors"
                 >
-                  🎤 Parler à Lisa
+                   Parler à Lisa
                 </button>
               ) : (
                 <button
                   onClick={stopRecording}
                   className="px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-medium transition-colors"
                 >
-                  ⏹ Arrêter le micro
+                  Arrêter le micro
                 </button>
               )}
               <button
                 onClick={disconnect}
                 className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-medium transition-colors"
               >
-                📴 Terminer
+                Terminer
               </button>
             </>
           )}
