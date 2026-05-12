@@ -1,308 +1,404 @@
+// apps/web/app/voice-test/page.tsx
+
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 interface TranscriptLine {
   role: 'user' | 'assistant';
   text: string;
-  id: string;
+  timestamp: Date;
 }
 
-type SessionStatus = 'idle' | 'connecting' | 'ready' | 'recording' | 'ended';
+type SessionState = 'idle' | 'connecting' | 'ready' | 'error';
+
+// ─── Constantes ───────────────────────────────────────────────────────────────
+
+const API_URL: string =
+  process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001';
+
+const SAMPLE_RATE = 24000;
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function VoiceTestPage() {
-  const [status, setStatus] = useState<SessionStatus>('idle');
-  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
-  const [currentDelta, setCurrentDelta] = useState('');
-  const [error, setError] = useState<string | null>(null);
-
+  // Socket & état session
   const socketRef = useRef<Socket | null>(null);
+  const [sessionState, setSessionState] = useState<SessionState>('idle');
+
+  // Audio — enregistrement
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+
+  // Audio — lecture (UN SEUL AudioContext pour toute la session)
   const audioContextRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const audioQueueRef = useRef<Float32Array[]>([]);
-  const isPlayingRef = useRef(false);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
+  const isPlayingRef = useRef<boolean>(false);
+  const nextPlayTimeRef = useRef<number>(0);
+
+  // Transcription & indicateurs
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [userSpeaking, setUserSpeaking] = useState<boolean>(false);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll transcript
+  // ─── Scroll auto transcript ─────────────────────────────────────────────────
+
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [transcript, currentDelta]);
+  }, [transcript]);
 
-  // Connexion WebSocket
-  const connect = useCallback(() => {
-    setStatus('connecting');
-    setError(null);
-    setTranscript([]);
+  // ─── AudioContext unique ────────────────────────────────────────────────────
 
-    // ← CHANGEMENT : URL dynamique via variable d'environnement
-    const apiUrl = (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api').replace('/api', '');
-    const socket = io(`${apiUrl}/voice`, {
+  const ensureAudioContext = useCallback((): AudioContext => {
+    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+      audioContextRef.current = new AudioContext({ sampleRate: SAMPLE_RATE });
+      nextPlayTimeRef.current = 0;
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      void audioContextRef.current.resume();
+    }
+    return audioContextRef.current;
+  }, []);
+
+  // ─── Scheduling audio (sans recréer l'AudioContext) ────────────────────────
+
+  const scheduleAudioChunk = useCallback(
+    (audioContext: AudioContext, pcm16Buffer: ArrayBuffer): void => {
+      const int16Array = new Int16Array(pcm16Buffer);
+      const float32Array = new Float32Array(int16Array.length);
+
+      for (let i = 0; i < int16Array.length; i++) {
+        const sample = int16Array[i];
+        float32Array[i] = sample < 0 ? sample / 32768.0 : sample / 32767.0;
+      }
+
+      const audioBuffer = audioContext.createBuffer(
+        1,
+        float32Array.length,
+        SAMPLE_RATE,
+      );
+      audioBuffer.copyToChannel(float32Array, 0);
+
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+
+      const currentTime: number = audioContext.currentTime;
+      const startTime: number = Math.max(currentTime, nextPlayTimeRef.current);
+      source.start(startTime);
+      nextPlayTimeRef.current = startTime + audioBuffer.duration;
+
+      setIsSpeaking(true);
+      source.onended = () => {
+        if (nextPlayTimeRef.current <= audioContext.currentTime + 0.05) {
+          setIsSpeaking(false);
+        }
+      };
+    },
+    [],
+  );
+
+  const processAudioQueue = useCallback((): void => {
+    if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+    isPlayingRef.current = true;
+
+    const audioContext = ensureAudioContext();
+
+    while (audioQueueRef.current.length > 0) {
+      const chunk = audioQueueRef.current.shift();
+      if (chunk) {
+        scheduleAudioChunk(audioContext, chunk);
+      }
+    }
+
+    isPlayingRef.current = false;
+  }, [ensureAudioContext, scheduleAudioChunk]);
+
+  // ─── Connexion Socket.io ────────────────────────────────────────────────────
+
+  const connectSocket = useCallback((): void => {
+    if (socketRef.current?.connected) return;
+
+    setSessionState('connecting');
+
+    const socket: Socket = io(`${API_URL}/voice`, {
       transports: ['websocket'],
     });
 
-    socketRef.current = socket;
-
     socket.on('connect', () => {
-      socket.emit('start');
+      socket.emit('start_session');
     });
 
-    socket.on('ready', () => {
-      setStatus('ready');
+    socket.on('session_ready', () => {
+      setSessionState('ready');
     });
 
-    socket.on('audio', ({ audio }: { audio: string }) => {
-      playAudio(audio);
-    });
-
-    socket.on('transcript_delta', ({ text }: { text: string }) => {
-      setCurrentDelta(prev => prev + text);
-    });
-
-    socket.on('transcript_done', ({ role, text }: { role: 'user' | 'assistant'; text: string }) => {
-      setCurrentDelta('');
-      setTranscript(prev => [
-        ...prev,
-        { role, text, id: `${Date.now()}-${Math.random()}` },
-      ]);
-    });
-
-    socket.on('error', ({ message }: { message: string }) => {
-      setError(message);
+    socket.on('session_error', (data: { message: string }) => {
+      console.error('Session error:', data.message);
+      setSessionState('error');
     });
 
     socket.on('session_ended', () => {
-      setStatus('ended');
-      stopMic();
+      setSessionState('idle');
+    });
+
+    socket.on('audio_chunk', (data: { audio: string }) => {
+      const binaryString: string = atob(data.audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      audioQueueRef.current.push(bytes.buffer);
+      processAudioQueue();
+    });
+
+    socket.on('audio_done', () => {
+      // queue se vide naturellement
+    });
+
+    socket.on('speech_started', () => {
+      setUserSpeaking(true);
+      // Interrompre Lisa proprement
+      if (audioContextRef.current) {
+        audioQueueRef.current = [];
+        nextPlayTimeRef.current = audioContextRef.current.currentTime;
+      }
+    });
+
+    socket.on('speech_stopped', () => {
+      setUserSpeaking(false);
+    });
+
+    socket.on('user_transcript', (data: { text: string }) => {
+      setTranscript((prev) => [
+        ...prev,
+        { role: 'user', text: data.text, timestamp: new Date() },
+      ]);
+    });
+
+    socket.on('assistant_transcript', (data: { text: string }) => {
+      setTranscript((prev) => [
+        ...prev,
+        { role: 'assistant', text: data.text, timestamp: new Date() },
+      ]);
     });
 
     socket.on('disconnect', () => {
-      setStatus('idle');
-      stopMic();
+      setSessionState('idle');
+      setIsRecording(false);
+      setIsSpeaking(false);
     });
-  }, []);
 
-  // Démarrage du micro
-  const startMic = useCallback(async () => {
-    if (status !== 'ready') return;
+    socketRef.current = socket;
+  }, [processAudioQueue]);
+
+  // ─── Microphone ─────────────────────────────────────────────────────────────
+
+  const startRecording = useCallback(async (): Promise<void> => {
+    ensureAudioContext(); // débloquer l'AudioContext de lecture via geste utilisateur
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
+      const stream: MediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          sampleRate: 16000,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
 
-      const audioContext = new AudioContext({ sampleRate: 24000 });
-      audioContextRef.current = audioContext;
+      mediaStreamRef.current = stream;
 
-      const source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
+      // AudioContext dédié à la CAPTURE (séparé de celui de la lecture)
+      const captureCtx = new AudioContext({ sampleRate: 16000 });
+      const source = captureCtx.createMediaStreamSource(stream);
+      const processor = captureCtx.createScriptProcessor(4096, 1, 1);
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcm16 = float32ToPcm16(inputData);
-        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-        socketRef.current?.emit('audio', { audio: base64 });
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        const inputData: Float32Array = e.inputBuffer.getChannelData(0);
+        const pcm16 = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]));
+          pcm16[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        let binary = '';
+        const bytes = new Uint8Array(pcm16.buffer);
+        bytes.forEach((b) => { binary += String.fromCharCode(b); });
+        const base64: string = btoa(binary);
+        socketRef.current?.emit('audio_chunk', { audio: base64 });
       };
 
       source.connect(processor);
-      processor.connect(audioContext.destination);
+      processor.connect(captureCtx.destination);
 
-      setStatus('recording');
-    } catch (err) {
-      setError("Impossible d'accéder au micro. Vérifiez les permissions.");
+      // Stocker le captureCtx pour le fermer proprement au stopRecording
+      (stream as MediaStream & { _captureCtx?: AudioContext })._captureCtx = captureCtx;
+
+      setIsRecording(true);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("Erreur d'accès au microphone:", message);
     }
-  }, [status]);
+  }, [ensureAudioContext]);
 
-  // Arrêt du micro
-  const stopMic = useCallback(() => {
-    processorRef.current?.disconnect();
-    processorRef.current = null;
-
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
-
-    socketRef.current?.emit('stop');
-    if (status === 'recording') setStatus('ready');
-  }, [status]);
-
-  // Lecture audio PCM16
-  const playAudio = useCallback((base64: string) => {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
+  const stopRecording = useCallback((): void => {
+    if (mediaStreamRef.current) {
+      const stream = mediaStreamRef.current as MediaStream & {
+        _captureCtx?: AudioContext;
+      };
+      stream.getTracks().forEach((track) => track.stop());
+      void stream._captureCtx?.close();
+      mediaStreamRef.current = null;
     }
-
-    const pcm16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(pcm16.length);
-    for (let i = 0; i < pcm16.length; i++) {
-      float32[i] = pcm16[i] / 32768;
-    }
-
-    audioQueueRef.current.push(float32);
-    if (!isPlayingRef.current) processAudioQueue();
+    setIsRecording(false);
   }, []);
 
-  const processAudioQueue = useCallback(() => {
-    if (audioQueueRef.current.length === 0) {
-      isPlayingRef.current = false;
-      return;
-    }
+  // ─── Déconnexion ────────────────────────────────────────────────────────────
 
-    isPlayingRef.current = true;
-    const chunk = audioQueueRef.current.shift()!;
-
-    const ctx = new AudioContext({ sampleRate: 24000 });
-    const buffer = ctx.createBuffer(1, chunk.length, 24000);
-    buffer.getChannelData(0).set(chunk);
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.onended = processAudioQueue;
-    source.start();
-  }, []);
-
-  // Déconnexion
-  const disconnect = useCallback(() => {
-    stopMic();
-    socketRef.current?.emit('end');
+  const disconnect = useCallback((): void => {
+    stopRecording();
+    socketRef.current?.emit('stop_session');
     socketRef.current?.disconnect();
     socketRef.current = null;
-    setStatus('idle');
-    setTranscript([]);
-    setCurrentDelta('');
-  }, [stopMic]);
 
-  // Conversion Float32 → PCM16
-  function float32ToPcm16(float32: Float32Array): Int16Array {
-    const pcm16 = new Int16Array(float32.length);
-    for (let i = 0; i < float32.length; i++) {
-      const s = Math.max(-1, Math.min(1, float32[i]));
-      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    }
-    return pcm16;
-  }
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    audioQueueRef.current = [];
+    nextPlayTimeRef.current = 0;
+
+    setSessionState('idle');
+    setIsSpeaking(false);
+    setUserSpeaking(false);
+  }, [stopRecording]);
+
+  // ─── Cleanup au démontage ───────────────────────────────────────────────────
+
+  useEffect(() => {
+    return () => {
+      disconnect();
+    };
+  }, [disconnect]);
+
+  // ─── Rendu ──────────────────────────────────────────────────────────────────
+
+  const stateLabels: Record<SessionState, string> = {
+    idle: 'Déconnecté',
+    connecting: 'Connexion...',
+    ready: 'Prêt',
+    error: 'Erreur',
+  };
+
+  const stateColors: Record<SessionState, string> = {
+    idle: 'bg-gray-400',
+    connecting: 'bg-yellow-400 animate-pulse',
+    ready: 'bg-green-500',
+    error: 'bg-red-500',
+  };
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-6">
-      <div className="w-full max-w-2xl flex flex-col gap-6">
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-start p-6">
+      <div className="w-full max-w-2xl space-y-6">
 
         {/* Header */}
         <div className="text-center">
-          <h1 className="text-2xl font-bold">Test vocal IA</h1>
-          <p className="text-gray-400 text-sm mt-1">
-            Parlez directement avec l&apos;assistant artisan
-          </p>
+          <h1 className="text-3xl font-bold text-gray-800">🔧 Lisa — Assistante vocale</h1>
+          <p className="text-gray-500 mt-1">Secrétaire de Jean Dupont, plombier à Lyon</p>
         </div>
 
-        {/* Status */}
-        <div className="flex items-center justify-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${
-            status === 'recording' ? 'bg-red-500 animate-pulse' :
-            status === 'ready' ? 'bg-green-500' :
-            status === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-            'bg-gray-500'
-          }`} />
-          <span className="text-sm text-gray-300">
-            {status === 'idle' && 'Prêt à démarrer'}
-            {status === 'connecting' && 'Connexion...'}
-            {status === 'ready' && 'Connecté — cliquez sur le micro pour parler'}
-            {status === 'recording' && "En cours d'enregistrement..."}
-            {status === 'ended' && 'Session terminée'}
+        {/* Statut */}
+        <div className="bg-white rounded-2xl shadow p-4 flex items-center gap-3">
+          <div className={`w-3 h-3 rounded-full ${stateColors[sessionState]}`} />
+          <span className="text-sm font-medium text-gray-700">
+            {stateLabels[sessionState]}
           </span>
-        </div>
-
-        {/* Transcript */}
-        <div className="bg-gray-900 rounded-xl p-4 h-80 overflow-y-auto flex flex-col gap-3">
-          {transcript.length === 0 && status === 'idle' && (
-            <p className="text-gray-500 text-sm text-center mt-8">
-              Démarrez une session pour commencer
-            </p>
+          {isSpeaking && (
+            <span className="ml-auto text-sm text-blue-500 animate-pulse">
+              🔊 Lisa parle...
+            </span>
           )}
-
-          {transcript.map((line) => (
-            <div
-              key={line.id}
-              className={`flex ${line.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            >
-              <div className={`max-w-xs px-4 py-2 rounded-2xl text-sm ${
-                line.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-700 text-gray-100'
-              }`}>
-                <p className="text-xs font-medium mb-1 opacity-70">
-                  {line.role === 'user' ? 'Vous' : 'Assistant'}
-                </p>
-                {line.text}
-              </div>
-            </div>
-          ))}
-
-          {/* Delta en cours */}
-          {currentDelta && (
-            <div className="flex justify-start">
-              <div className="max-w-xs px-4 py-2 rounded-2xl text-sm bg-gray-700 text-gray-100">
-                <p className="text-xs font-medium mb-1 opacity-70">Assistant</p>
-                {currentDelta}
-                <span className="animate-pulse">▋</span>
-              </div>
-            </div>
+          {userSpeaking && !isSpeaking && (
+            <span className="ml-auto text-sm text-green-500 animate-pulse">
+              🎤 Vous parlez...
+            </span>
           )}
-
-          <div ref={transcriptEndRef} />
         </div>
-
-        {/* Erreur */}
-        {error && (
-          <div className="bg-red-900/50 border border-red-500 rounded-lg p-3 text-red-300 text-sm">
-            {error}
-          </div>
-        )}
 
         {/* Contrôles */}
-        <div className="flex gap-3 justify-center">
-          {status === 'idle' || status === 'ended' ? (
+        <div className="flex gap-3 justify-center flex-wrap">
+          {(sessionState === 'idle' || sessionState === 'error') && (
             <button
-              onClick={connect}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-xl font-medium transition-colors"
+              onClick={connectSocket}
+              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors"
             >
-              Démarrer une session
+              📞 Démarrer la session
             </button>
-          ) : (
+          )}
+          {sessionState === 'ready' && (
             <>
-              {status === 'ready' && (
+              {!isRecording ? (
                 <button
-                  onClick={startMic}
-                  className="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-xl font-medium transition-colors flex items-center gap-2"
+                  onClick={() => { void startRecording(); }}
+                  className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors"
                 >
-                  🎤 Parler
+                  🎤 Parler à Lisa
+                </button>
+              ) : (
+                <button
+                  onClick={stopRecording}
+                  className="px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white rounded-xl font-medium transition-colors"
+                >
+                  ⏹ Arrêter le micro
                 </button>
               )}
-
-              {status === 'recording' && (
-                <button
-                  onClick={stopMic}
-                  className="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-medium transition-colors flex items-center gap-2 animate-pulse"
-                >
-                  ⏹ Stop
-                </button>
-              )}
-
               <button
                 onClick={disconnect}
-                className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-xl font-medium transition-colors"
+                className="px-6 py-3 bg-red-500 hover:bg-red-600 text-white rounded-xl font-medium transition-colors"
               >
-                Terminer
+                📴 Terminer
               </button>
             </>
           )}
         </div>
 
+        {/* Transcript */}
+        <div className="bg-white rounded-2xl shadow p-4 h-96 overflow-y-auto flex flex-col gap-3">
+          {transcript.length === 0 ? (
+            <p className="text-gray-400 text-sm text-center my-auto">
+              Le transcript de la conversation apparaîtra ici...
+            </p>
+          ) : (
+            transcript.map((line, i) => (
+              <div
+                key={i}
+                className={`flex ${line.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-xs px-4 py-2 rounded-2xl text-sm ${
+                    line.role === 'user'
+                      ? 'bg-blue-100 text-blue-900 rounded-br-sm'
+                      : 'bg-gray-100 text-gray-800 rounded-bl-sm'
+                  }`}
+                >
+                  <p className="font-medium text-xs mb-1 opacity-60">
+                    {line.role === 'user' ? 'Vous' : 'Lisa'}
+                  </p>
+                  {line.text}
+                </div>
+              </div>
+            ))
+          )}
+          <div ref={transcriptEndRef} />
+        </div>
+
+        {/* Note technique */}
+        <p className="text-center text-xs text-gray-400">
+          Voix : shimmer · VAD server_vad · PCM16 24kHz · OpenAI Realtime API
+        </p>
       </div>
     </div>
   );
