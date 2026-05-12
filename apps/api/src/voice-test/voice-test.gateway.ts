@@ -195,19 +195,25 @@ export class VoiceTestGateway implements OnGatewayConnection, OnGatewayDisconnec
   // ─── Events client → gateway ───────────────────────────────────────────────
 
   @SubscribeMessage('start_session')
-  async handleStartSession(@ConnectedSocket() client: Socket) {
-    this.logger.log(`Démarrage session pour client ${client.id}`);
+async handleStartSession(@ConnectedSocket() client: Socket) {
+  this.logger.log(`Démarrage session pour client ${client.id}`);
 
-    // Créer la CallSession en BDD dès le début
-    const session = this.sessions.get(client.id);
-    if (session) {
+  const session = this.sessions.get(client.id);
+  if (session) {
+    try {
       const callSessionId = await this.voiceTestService.createCallSession();
       session.callSessionId = callSessionId;
-      client.emit('call_session_id', { callSessionId });
+      if (callSessionId) {
+        client.emit('call_session_id', { callSessionId });
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`createCallSession échoué, on continue quand même : ${String(err)}`);
     }
-
-    await this.createOpenAiSession(client);
   }
+
+  // On ouvre OpenAI quoi qu'il arrive
+  await this.createOpenAiSession(client);
+}
 
   @SubscribeMessage('audio_chunk')
   handleAudioChunk(

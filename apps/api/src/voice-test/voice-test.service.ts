@@ -24,7 +24,8 @@ export class VoiceTestService {
 
   // ─── Créer une CallSession au début de chaque appel ───────────────────────
 
-  async createCallSession(): Promise<string> {
+ async createCallSession(): Promise<string | null> {
+  try {
     const session = await this.prisma.callSession.create({
       data: {
         businessId: this.DEMO_BUSINESS_ID,
@@ -34,8 +35,11 @@ export class VoiceTestService {
     });
     this.logger.log(`CallSession créée : ${session.id}`);
     return session.id;
+  } catch (err: unknown) {
+    this.logger.warn(`Impossible de créer la CallSession (businessId inexistant ?) : ${String(err)}`);
+    return null;
   }
-
+}
   // ─── Clore la CallSession à la fin ───────────────────────────────────────
 
   async closeCallSession(callSessionId: string): Promise<void> {
