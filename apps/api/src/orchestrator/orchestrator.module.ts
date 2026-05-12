@@ -1,3 +1,5 @@
+// apps/api/src/orchestrator/orchestrator.module.ts
+
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
@@ -16,14 +18,14 @@ import { PrismaModule } from '../prisma/prisma.module';
   imports: [PrismaModule, ConfigModule],
   controllers: [OrchestratorController],
   providers: [
-    // Fournit le client Redis directement depuis les variables d'env
     {
       provide: REDIS_CLIENT,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         return new Redis({
-          host: config.get<string>('REDIS_HOST', 'localhost'),
-          port: config.get<number>('REDIS_PORT', 6379),
+          host: config.get<string>('REDISHOST', 'localhost'),
+          port: config.get<number>('REDISPORT', 6379),
+          password: config.get<string>('REDIS_PASSWORD') || undefined,
         });
       },
     },
